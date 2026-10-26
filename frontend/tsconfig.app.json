@@ -22,9 +22,9 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true,
     "ignoreDeprecations": "6.0",
-    "baseUrl": "./src",
+    "baseUrl": ".",
     "paths": {
-      "@/*": ["./*"]
+      "@/*": ["src/*"]
     }
   },
   "include": ["src"],

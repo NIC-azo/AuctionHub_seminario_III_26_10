@@ -1,0 +1,16 @@
+FROM node:22-alpine
+
+WORKDIR /app
+
+ENV DOCKER_DEV=true
+
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+
+COPY package.json ./
+RUN pnpm install --no-frozen-lockfile
+
+COPY . .
+
+EXPOSE 5173
+
+CMD ["pnpm", "dev", "--", "--host", "0.0.0.0"]
