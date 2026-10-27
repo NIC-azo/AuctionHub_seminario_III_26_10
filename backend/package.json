@@ -18,12 +18,16 @@
     "prisma:studio": "prisma studio"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1157.0",
+    "@prisma/adapter-pg": "6.19.3",
     "@prisma/client": "6.19.3",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "jsonwebtoken": "^9.0.3"
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.5.0",
+    "pg": "^8.21.0"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
@@ -31,7 +35,9 @@
     "@types/dotenv": "^8.2.3",
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
+    "@types/multer": "^2.3.0",
     "@types/node": "^25.9.1",
+    "@types/pg": "^8.20.0",
     "prisma": "6.19.3",
     "tsx": "^4.22.4",
     "typescript": "~6.0.3"

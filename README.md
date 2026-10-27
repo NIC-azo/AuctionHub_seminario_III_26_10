@@ -1,17 +1,17 @@
 # AuctionHub
 
-AuctionHub es un proyecto de subastas con frontend React + TypeScript, backend Node.js + Express + Prisma y PostgreSQL. El entorno de desarrollo se orquesta con Docker Compose y puede abrirse desde VS Code mediante Dev Containers.
+AuctionHub es un proyecto de subastas con frontend React + TypeScript, backend Node.js + Express + Prisma y PostgreSQL. El entorno de desarrollo se orquesta con Docker Compose; el flujo recomendado en Windows sincroniza las fuentes con Compose Watch.
 
-> **Estado del proyecto:** `docker compose up --build -d` levanta MinIO, PostgreSQL, el inicializador del bucket, cAdvisor, Prometheus, Grafana, backend y frontend. En el entorno comprobado, los bind mounts desde la unidad `E:` aparecen vacíos dentro de Docker Desktop; por eso backend y frontend usan el código copiado en sus imágenes y requieren reconstrucción para incorporar cambios del host. El proceso backend permanece en modo watch, pero `backend/src/index.ts` todavía no implementa el servidor Express/API.
+> **Estado del proyecto:** `docker compose up --build -d` levanta MinIO, PostgreSQL, el inicializador del bucket, cAdvisor, Prometheus, Grafana, backend y frontend. Compose Watch sincroniza al contenedor los cambios de las fuentes seleccionadas del host. El backend ya expone Express, autenticación JWT y rutas de productos; para usar las rutas que acceden a datos primero se debe aplicar la migración Prisma inicial.
 
 ## Requisitos
 
 - Git.
 - Docker Desktop iniciado y con soporte para Docker Compose.
-- Visual Studio Code y la extensión **Dev Containers** para abrir el workspace dentro de un contenedor.
+- Visual Studio Code para editar el proyecto localmente.
 - Opcional: pgAdmin 4 instalado en Windows para administrar PostgreSQL con interfaz gráfica.
 
-No es necesario instalar Node.js, pnpm ni dependencias JavaScript en Windows para el flujo con Dev Containers. Las dependencias se instalan dentro de las imágenes/volúmenes de Docker al preparar los servicios.
+No es necesario instalar Node.js, pnpm ni dependencias JavaScript en Windows para el flujo con Compose Watch. Las dependencias se instalan dentro de las imágenes Docker.
 
 ## Estructura del proyecto
 
@@ -66,13 +66,13 @@ No es necesario instalar Node.js, pnpm ni dependencias JavaScript en Windows par
 | `.env.example` | Plantilla versionable para variables que consume Compose: usuario/contraseña representativos de PostgreSQL, secretos de ejemplo, MinIO, Grafana y puertos. No contiene las credenciales reales de una computadora. |
 | `.env` | Archivo local ignorado por Git para los valores reales de Compose. No debe compartirse ni subirse al repositorio. |
 | `.gitignore` | Excluye dependencias, resultados de build, archivos locales y archivos `.env`. |
-| `.devcontainer/devcontainer.json` | Indica a VS Code que use `docker-compose.yml`, abra el servicio `backend`, monte el proyecto como `/workspace`, reenvíe puertos y recomiende extensiones. |
+| `.devcontainer/devcontainer.json` | Configuración heredada de Dev Containers. No se usa en el flujo recomendado de Compose Watch desde la unidad USB. |
 
 ### Backend
 
 | Archivo | Responsabilidad |
 |---|---|
-| `backend/package.json` | Dependencias y scripts pnpm: `dev` usa `tsx watch`, `build` compila TypeScript, `start:prod` ejecuta `dist/index.js`, y hay scripts para generar Prisma, migrar y abrir Prisma Studio. Prisma y `@prisma/client` están fijados en `6.19.3`. |
+| `backend/package.json` | Dependencias y scripts pnpm: `dev` usa `tsx watch`, `build` compila TypeScript, `start:prod` ejecuta `dist/index.js`, y hay scripts para generar Prisma, migrar y abrir Prisma Studio. Prisma, `@prisma/client` y `@prisma/adapter-pg` están fijados en `6.19.3`; `pg` proporciona el pool PostgreSQL; AWS S3 SDK y Multer gestionan imágenes. |
 | `backend/.env.example` | Plantilla de configuración para ejecución local del backend. Su URL de ejemplo usa `localhost:5433`; Compose la reemplaza por la dirección interna `postgres:5432` al ejecutar el backend en Docker. |
 | `backend/.env` | Variables privadas locales del backend. No subir a Git. |
 | `backend/Dockerfile.dev` | Imagen de desarrollo Node/pnpm; habilita polling y ejecuta el modo `tsx watch` al iniciarse mediante Compose. |
@@ -80,7 +80,12 @@ No es necesario instalar Node.js, pnpm ni dependencias JavaScript en Windows par
 | `backend/.dockerignore` | Evita incluir archivos locales, dependencias y artefactos en el contexto de build. |
 | `backend/tsconfig.json` | Configura TypeScript para Node.js, modo estricto, salida `dist` y alias `@/*`. |
 | `backend/prisma/schema.prisma` | Define el datasource PostgreSQL, el generador del cliente Prisma y los modelos `User`, `Product` y `Purchase`. |
-| `backend/src/` | Código de la API. `index.ts` es el punto de entrada actual, pero todavía debe implementar el servidor Express. La ausencia de esa implementación no produce el error de pnpm que indica que falta `package.json` en `/app`. |
+| `backend/src/config/prisma.ts` | Carga las variables de entorno, conecta PostgreSQL mediante `pg.Pool` y `PrismaPg`, y exporta un cliente Prisma singleton para el backend. |
+| `backend/src/models/` | Acceso a datos con operaciones CRUD de Prisma para usuarios, productos y compras. |
+| `backend/src/services/` | Casos de uso de autenticación/productos, carga de imágenes en MinIO y middleware de Multer. |
+| `backend/src/controllers/` y `backend/src/routes/` | Validan las peticiones HTTP, devuelven respuestas JSON y conectan los endpoints con los servicios. |
+| `backend/src/middlewares/` | Verifica JWT y convierte errores en respuestas JSON estructuradas. |
+| `backend/src/index.ts` | Configura CORS y JSON, monta las rutas `/api`, expone health check y escucha en el puerto configurado. |
 
 ### Frontend
 
@@ -119,7 +124,7 @@ Este bloque deja a la vista las configuraciones que determinan cómo se instalan
 ### Raíz
 
 - `docker-compose.yml`: define los ocho servicios y arranca todos con `docker compose up --build`.
-- `.devcontainer/devcontainer.json`: abre el servicio backend como workspace `/workspace`.
+- `.devcontainer/devcontainer.json`: configuración heredada; no abrir el contenedor como workspace al usar Compose Watch desde `E:`.
 - No hay `package.json` ni `tsconfig.json` en la raíz; cada aplicación mantiene sus propios archivos.
 
 ### Backend
@@ -444,21 +449,30 @@ COPY prometheus.yml /etc/prometheus/prometheus.yml
    - `frontend/.env` se carga al servicio frontend mediante `env_file` y configura `VITE_API_URL`, normalmente `http://localhost:3000/api` para las peticiones del navegador.
    - Si un puerto ya está ocupado, cambia el valor correspondiente en el `.env` raíz.
 4. Verifica los archivos privados: `.env` y sus variantes están ignorados por Git. Comparte únicamente las plantillas `.env.example`, nunca los secretos reales.
-5. Asegúrate de que Docker Desktop esté iniciado y, desde PowerShell en la raíz del proyecto, levanta todos los servicios:
+5. Asegúrate de que Docker Desktop esté iniciado. Desde PowerShell en la raíz del proyecto, inicia todos los servicios y la sincronización automática:
 
    ```powershell
-   docker compose up --build -d
-   docker compose ps -a
+   docker compose up --build --watch
    ```
 
-   `--build` construye las imágenes de backend, frontend y Prometheus cuando sea necesario; dentro de las imágenes de desarrollo `RUN pnpm install` instala las dependencias, sin instalar Node/pnpm ni crear `node_modules` en Windows. `-d` deja los servicios en segundo plano y devuelve el control de PowerShell. Sin `-d`, Compose permanece conectado a los logs; `Ctrl+C` detiene los servicios adjuntos.
-6. La configuración de Dev Containers está disponible para abrir el workspace con **Dev Containers: Reopen in Container** (`Ctrl+Shift+P`). En esta PC, el montaje del proyecto desde `E:` puede aparecer vacío dentro del contenedor; para editar con el código sincronizado, usa una copia alojada en el sistema de archivos Linux de WSL2 como se explica abajo.
+   Deja ese terminal abierto mientras trabajas: Compose Watch sincroniza los cambios del host al contenedor. Si prefieres servicios en segundo plano, usa dos terminales:
 
-Dev Containers construye las imágenes de desarrollo y arranca los servicios de Compose. La primera preparación puede tardar porque Docker descarga imágenes e instala las dependencias dentro de los contenedores. El backend y el frontend trabajan en `/app` dentro de sus respectivos servicios.
+   ```powershell
+   # Terminal 1: iniciar servicios en segundo plano
+   docker compose up --build -d
+
+   # Terminal 2: iniciar el observador
+   docker compose watch --no-up
+   ```
+
+   `--build` instala las dependencias dentro de las imágenes, sin crear `node_modules` en Windows. Con el modo adjunto, `Ctrl+C` detiene los servicios; en el modo de dos terminales, `Ctrl+C` detiene el observador y deja los servicios activos. Revisa el estado con `docker compose ps -a`.
+6. Abre y edita el proyecto directamente en VS Code desde la carpeta de Windows `E:`. No uses **Dev Containers: Reopen in Container** para este flujo: el bind mount del workspace interfiere con Compose Watch.
 
 ### Nota para Docker Desktop en Windows
 
-En esta computadora Docker Desktop creó los bind mounts desde `E:` sin exponer los archivos que contienen `package.json`; montarlos sobre `/app` ocultaba el código que sí estaba en las imágenes y provocaba `ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND`. Por eso Compose conserva el código del build dentro de `/app` y no monta `backend/` ni `frontend/` desde Windows. Los servicios pueden iniciar, pero cambios hechos en el host necesitan un nuevo `docker compose up --build -d`. Para editar con hot reload desde el host, clona el repo en el sistema de archivos Linux de WSL2 y abre esa copia en VS Code conectado a WSL antes de habilitar los bind mounts de fuentes.
+En esta computadora Docker Desktop creó los bind mounts desde `E:` sin exponer los archivos que contienen `package.json`; montarlos sobre `/app` ocultaba el código de la imagen y provocaba `ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND`. Por eso Compose conserva el código inicial del build dentro de `/app` y usa **Compose Watch** para sincronizar selectivamente fuentes desde el proyecto en `E:`. Así no se monta la carpeta USB completa sobre `/app` ni se crean dependencias en el USB.
+
+La carpeta de Windows abierta en VS Code es la fuente de verdad. Compose Watch sincroniza en una sola dirección: host → contenedor. El servicio backend ya no monta el proyecto completo en `/workspace`, porque ese bind mount impedía observar `backend/src`; por ello, el modo Dev Container no forma parte del flujo USB actual. No copies ni edites los archivos en `/app` esperando que vuelvan al USB. Si se desea trabajar dentro de Dev Containers, primero hay que preparar un flujo separado desde una copia en el sistema de archivos Linux de WSL2.
 
 El servicio Prometheus incluye su configuración en la imagen mediante `observability/prometheus/Dockerfile`, en vez de montarla como archivo desde Windows. Esto evita que el origen del bind mount de `prometheus.yml` se interprete como directorio.
 
@@ -468,8 +482,8 @@ Los puertos publicados se definen en el `.env` raíz. Estado comprobado en Docke
 
 | Servicio | Dirección/puertos | Estado observado |
 |---|---|---|
-| Frontend | `http://localhost:5173` | Contenedor en ejecución; Vite responde HTTP 200. Usa el código de la imagen, porque el bind mount de `E:` se observó vacío. |
-| Backend | `http://localhost:3000` | Contenedor y watcher en ejecución. La API aún no está disponible hasta implementar el servidor Express en `backend/src/index.ts`. |
+| Frontend | `http://localhost:5173` | Vite responde HTTP 200; Compose Watch sincroniza `frontend/src`, `public`, `index.html` y configuraciones seleccionadas. |
+| Backend | `http://localhost:3000` | `tsx watch` ejecuta el backend y Compose Watch sincroniza `backend/src`. La API aún no está disponible hasta implementar el servidor Express en `backend/src/index.ts`. |
 | PostgreSQL | `localhost:5433` desde Windows; `postgres:5432` dentro de Compose | En ejecución y saludable; la base `auctionhub` aparece en pgAdmin. |
 | MinIO API | `http://localhost:9000` | En ejecución; `/minio/health/live` respondió HTTP 200. |
 | MinIO Console | `http://localhost:9001` | Publicada por el contenedor MinIO. |
@@ -511,7 +525,7 @@ El puerto publicado predeterminado es `5433` porque PostgreSQL instalado directa
 
 ## MinIO y acceso al registro
 
-Compose usa `quay.io/minio/minio:latest` para el servidor. Como Quay devolvía `401 UNAUTHORIZED` para `quay.io/minio/mc:latest`, `minio-init` ahora usa la imagen pública `amazon/aws-cli:2.27.49` y se conecta a MinIO por el endpoint S3 `http://minio:9000`. Comprueba que MinIO responda, crea el bucket configurado si aún no existe y termina con código 0; el backend espera que termine ese inicializador. Es un contenedor de tarea única, no un servicio persistente: después de crear/verificar el bucket, `Exited (0)` y el icono de detenido en Docker Desktop son el estado correcto. Los servicios backend y frontend dependen de su finalización exitosa.
+Compose usa `quay.io/minio/minio:latest` para el servidor. Como Quay devolvía `401 UNAUTHORIZED` para `quay.io/minio/mc:latest`, `minio-init` ahora usa la imagen pública `amazon/aws-cli:2.27.49` y se conecta a MinIO por el endpoint S3 `http://minio:9000`. Comprueba que MinIO responda, crea el bucket configurado si aún no existe, aplica lectura pública a los objetos del bucket para servir imágenes y termina con código 0; el backend espera que termine ese inicializador. El bucket se define mediante `MINIO_BUCKET` en `.env` raíz (la plantilla propone `auction-products`). Es un contenedor de tarea única, no un servicio persistente: después de crear/verificar el bucket, `Exited (0)` y el icono de detenido en Docker Desktop son el estado correcto.
 
 ## Base de datos y Prisma
 
@@ -523,21 +537,34 @@ docker compose exec backend pnpm run prisma:migrate -- --name init
 
 Para un cambio posterior del esquema, usa el mismo comando con un nombre descriptivo distinto, por ejemplo `--name add_auction_fields`. Las migraciones se guardan en `backend/prisma/migrations` y deben versionarse junto con el código. Compose genera el cliente Prisma al iniciar el backend.
 
+La conexión de la aplicación se exporta como singleton desde `backend/src/config/prisma.ts`: el módulo carga `.env` al ejecutar localmente, requiere `DATABASE_URL` y conecta Prisma 6.19.3 mediante `@prisma/adapter-pg` y un `pg.Pool`. En Compose, `DATABASE_URL` se inyecta con el hostname interno `postgres`; no copies las credenciales de una computadora al código fuente.
+
 Para ver PostgreSQL en pgAdmin no es necesario ejecutar Prisma Studio; pgAdmin se conecta directamente al servicio publicado en `localhost`.
+
+## API del backend
+
+Las rutas de autenticación son `POST /api/auth/register` y `POST /api/auth/login`. El registro recibe JSON con `username`, `email` y `password`; el inicio de sesión recibe `email` y `password`, y devuelve un JWT con una hora de vigencia.
+
+`GET /api/products` lista productos disponibles. `POST /api/products` requiere `Authorization: Bearer <token>` y `multipart/form-data` con `title`, `description`, `price` e imagen en el campo `image` (JPEG, PNG o WebP; máximo 5 MB). El backend almacena la imagen en el bucket de MinIO configurado y persiste su URL pública con el producto. `POST /api/products/:id/buy` requiere JWT; marca el producto como vendido y registra la compra dentro de una transacción Prisma, con actualización condicional para evitar compras simultáneas. El vendedor no puede comprar su propio producto.
+
+Las respuestas exitosas usan `{ "data": ... }` y los errores `{ "error": { "code": ..., "message": ... } }`. `GET /api/health` es un health check de la API. Para ejecutar fuera de Compose, configura en `backend/.env` las credenciales MinIO, `MINIO_ENDPOINT`, `MINIO_BUCKET` y `MINIO_PUBLIC_ENDPOINT`; por defecto la URL pública usa `http://localhost:9000`. Ajusta `MINIO_PUBLIC_ENDPOINT` si el frontend accederá desde otro host.
 
 ## Desarrollo y recarga de cambios
 
-Las imágenes de desarrollo instalan las dependencias con `RUN pnpm install` durante el build y copian el código con `COPY . .`. Compose mantiene dependencias en volúmenes nombrados, pero no monta los directorios del host sobre `/app`, porque las pruebas en esta computadora mostraron que Docker Desktop exponía esas rutas vacías y ocultaba `package.json`.
+Las imágenes de desarrollo instalan dependencias con `RUN pnpm install` durante el build y copian una versión inicial del código con `COPY . .`. No se montan `node_modules` ni las carpetas `backend/` y `frontend/` del USB sobre `/app`: las dependencias quedan dentro del contenedor y Compose Watch envía los cambios seleccionados desde el host.
 
-Por este motivo, los cambios locales a los archivos fuente no llegan al contenedor automáticamente en esta ubicación de Windows; después de editar se debe reconstruir el servicio (`docker compose up --build -d`). Para habilitar sincronización/hot reload desde el host, clona o mueve el proyecto al sistema de archivos Linux de WSL2 y abre esa carpeta desde VS Code conectado a WSL; luego se puede reactivar el montaje de fuentes.
+Inicia la observación desde la raíz con `docker compose up --build --watch`. Para servicios en segundo plano, ejecuta `docker compose up --build -d` y después `docker compose watch --no-up` en una terminal que mantengas abierta. El observador sincroniza los archivos desde Windows a `/app`; no sincroniza modificaciones hechas directamente dentro del contenedor de regreso al USB.
 
 Los Dockerfiles distinguen desarrollo y producción:
 
-- **Backend:** `pnpm dev` ejecuta `tsx watch src/index.ts`; al guardar cambios TypeScript, el proceso del backend reinicia automáticamente. El polling ayuda a detectar cambios del sistema de archivos en Docker.
-- **Frontend:** Vite escucha en `0.0.0.0:5173`; `DOCKER_DEV=true` activa polling y Vite aplica HMR al guardar componentes, estilos y otros módulos compatibles.
+- **Backend:** Compose Watch sincroniza `backend/src` a `/app/src`; `tsx watch src/index.ts` detecta la actualización y reinicia el proceso.
+- **Prisma:** un cambio de `backend/prisma/schema.prisma` se sincroniza y ejecuta `pnpm prisma:generate` en el contenedor. La migración de base de datos continúa siendo manual.
+- **Frontend:** Compose Watch sincroniza `frontend/src`, `public`, `index.html` y configuraciones seleccionadas. Vite escucha en `0.0.0.0:5173`, usa polling en Docker y aplica HMR.
 - En las rutas de desarrollo, las dependencias se instalan durante el build (`RUN pnpm install`) y el `CMD` ejecuta `pnpm dev`. En el Dockerfile de producción del frontend, pnpm se usa en la etapa de build y el `CMD` del runtime ejecuta Nginx para servir el resultado estático.
-- En la configuración actual basada en imágenes, reconstruye el servicio después de cambiar código del host. Cambios en Dockerfiles, `docker-compose.yml` o dependencias también requieren reconstruir/recrear servicios.
-- Cambios en `schema.prisma` requieren generar el cliente y, cuando se cambia el modelo de datos, crear y aplicar una migración.
+- Cambios en `package.json`, `tsconfig.json` o `Dockerfile.dev` reconstruyen la imagen. Se eliminaron los volúmenes nombrados de `node_modules`, que ocultarían las dependencias actualizadas tras un rebuild.
+- El proyecto no tiene `pnpm-lock.yaml` versionados todavía; si se añaden, se deben agregar reglas Watch de rebuild para esos archivos.
+- Compose Watch es unidireccional (host → contenedor). Los archivos generados dentro del contenedor —por ejemplo las nuevas carpetas de migración Prisma— no aparecen automáticamente en el USB; hay que copiarlos a la fuente de trabajo antes de versionarlos.
+- Para Compose Watch desde el USB, abre la carpeta local en VS Code y deja activa una de las modalidades de observación indicadas arriba. El watcher no crea `node_modules` en Windows.
 
 Comandos útiles desde la raíz del proyecto:
 
