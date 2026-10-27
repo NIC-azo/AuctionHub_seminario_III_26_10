@@ -2,7 +2,7 @@
 
 AuctionHub es un proyecto de subastas con frontend React + TypeScript, backend Node.js + Express + Prisma y PostgreSQL. El entorno de desarrollo se orquesta con Docker Compose y puede abrirse desde VS Code mediante Dev Containers.
 
-> **Estado del proyecto:** PostgreSQL está accesible desde pgAdmin y los servicios de observabilidad están levantados en el entorno local comprobado. Backend y frontend todavía no inician correctamente porque Docker Desktop no expone los archivos del workspace montados desde `F:` dentro de sus contenedores. El error reportado es que no se encuentra `package.json` en `/app`; no lo causa que falte un servidor Express en `index.ts`.
+> **Estado del proyecto:** `docker compose up --build -d` levanta MinIO, PostgreSQL, el inicializador del bucket, cAdvisor, Prometheus, Grafana, backend y frontend. En el entorno comprobado, los bind mounts desde la unidad `E:` aparecen vacíos dentro de Docker Desktop; por eso backend y frontend usan el código copiado en sus imágenes y requieren reconstrucción para incorporar cambios del host. El proceso backend permanece en modo watch, pero `backend/src/index.ts` todavía no implementa el servidor Express/API.
 
 ## Requisitos
 
@@ -62,7 +62,7 @@ No es necesario instalar Node.js, pnpm ni dependencias JavaScript en Windows par
 
 | Archivo | Responsabilidad |
 |---|---|
-| `docker-compose.yml` | Define PostgreSQL, MinIO, inicialización del bucket, backend, frontend, cAdvisor, Prometheus y Grafana. Declara puertos, dependencias, health check de PostgreSQL, volúmenes y etiquetas comunes. MinIO y su cliente `mc` usan imágenes de `quay.io/minio`. |
+| `docker-compose.yml` | Orquesta PostgreSQL, MinIO, inicialización del bucket, backend, frontend, cAdvisor, Prometheus y Grafana. Declara puertos, dependencias, health check de PostgreSQL, volúmenes y etiquetas comunes. La inicialización de MinIO usa AWS CLI con endpoint S3 compatible. Todos los servicios se incluyen en `docker compose up`. |
 | `.env.example` | Plantilla versionable para variables que consume Compose: usuario/contraseña representativos de PostgreSQL, secretos de ejemplo, MinIO, Grafana y puertos. No contiene las credenciales reales de una computadora. |
 | `.env` | Archivo local ignorado por Git para los valores reales de Compose. No debe compartirse ni subirse al repositorio. |
 | `.gitignore` | Excluye dependencias, resultados de build, archivos locales y archivos `.env`. |
@@ -112,6 +112,321 @@ No es necesario instalar Node.js, pnpm ni dependencias JavaScript en Windows par
 | `scripts/minio-init.ps1` | Script auxiliar de PowerShell para inicializar MinIO. |
 | `scripts/backup.ps1` | Script auxiliar de PowerShell para respaldos. |
 
+## Inventario y contenido de Dockerfiles, manifests y tsconfig
+
+Este bloque deja a la vista las configuraciones que determinan cómo se instalan, compilan e inician los entornos. El `docker-compose.yml` de la raíz es el orquestador; no existe un Dockerfile único en la raíz porque backend y frontend tienen sus propias imágenes.
+
+### Raíz
+
+- `docker-compose.yml`: define los ocho servicios y arranca todos con `docker compose up --build`.
+- `.devcontainer/devcontainer.json`: abre el servicio backend como workspace `/workspace`.
+- No hay `package.json` ni `tsconfig.json` en la raíz; cada aplicación mantiene sus propios archivos.
+
+### Backend
+
+#### `backend/Dockerfile.dev`
+
+```dockerfile
+FROM node:22-alpine
+
+WORKDIR /app
+
+ENV CHOKIDAR_USEPOLLING=true
+
+RUN apk add --no-cache openssl
+
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+
+COPY package.json ./
+RUN pnpm install --no-frozen-lockfile
+
+COPY . .
+
+EXPOSE 3000
+
+CMD ["pnpm", "dev"]
+```
+
+#### `backend/Dockerfile` (producción)
+
+```dockerfile
+FROM node:22-alpine AS build
+
+WORKDIR /app
+
+RUN apk add --no-cache openssl \
+    && corepack enable \
+    && corepack prepare pnpm@10.33.0 --activate
+
+COPY package.json ./
+RUN pnpm install --no-frozen-lockfile
+
+COPY prisma ./prisma
+COPY tsconfig.json ./
+COPY src ./src
+
+RUN pnpm prisma:generate \
+    && pnpm build \
+    && pnpm prune --prod
+
+FROM node:22-alpine AS runtime
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+RUN apk add --no-cache openssl
+
+COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/prisma ./prisma
+
+EXPOSE 3000
+
+CMD ["node", "dist/index.js"]
+```
+
+#### `backend/package.json`
+
+```json
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.33.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "start:prod": "node dist/index.js",
+    "build": "tsc",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@prisma/client": "6.19.3",
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
+    "@types/cors": "^2.8.19",
+    "@types/dotenv": "^8.2.3",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^25.9.1",
+    "prisma": "6.19.3",
+    "tsx": "^4.22.4",
+    "typescript": "~6.0.3"
+  }
+}
+```
+
+#### `backend/tsconfig.json`
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "rootDir": "src",
+    "outDir": "dist",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+    "types": ["node"],
+    "sourceMap": true
+  },
+  "include": ["src/**/*.ts"]
+}
+```
+
+### Frontend
+
+#### `frontend/Dockerfile.dev`
+
+```dockerfile
+FROM node:22-alpine
+
+WORKDIR /app
+
+ENV DOCKER_DEV=true
+
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+
+COPY package.json ./
+RUN pnpm install --no-frozen-lockfile
+
+COPY . .
+
+EXPOSE 5173
+
+CMD ["pnpm", "dev", "--", "--host", "0.0.0.0"]
+```
+
+#### `frontend/Dockerfile` (producción)
+
+```dockerfile
+FROM node:22-alpine AS build
+
+WORKDIR /app
+
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+
+COPY package.json ./
+RUN pnpm install --no-frozen-lockfile
+
+COPY . .
+
+ARG VITE_API_URL=http://localhost:3000/api
+ENV VITE_API_URL=$VITE_API_URL
+
+RUN pnpm build
+
+FROM nginx:alpine AS runtime
+
+COPY --from=build /app/dist /usr/share/nginx/html
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]
+```
+
+#### `frontend/package.json`
+
+```json
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.101.2",
+    "axios": "^1.18.0",
+    "lucide-react": "^1.61.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.1",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "eslint": "^10.13.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.7",
+    "globals": "^17.13.0",
+    "tailwindcss": "^4.3.1",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.71.2",
+    "vite": "^8.3.4"
+  }
+}
+```
+
+#### `frontend/tsconfig.json`
+
+```json
+{
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.node.json" }
+  ]
+}
+```
+
+#### `frontend/tsconfig.app.json`
+
+```json
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "esnext",
+    "types": ["vite/client"],
+    "allowArbitraryExtensions": true,
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+    "ignoreDeprecations": "6.0",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist"]
+}
+```
+
+#### `frontend/tsconfig.node.json`
+
+```json
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "skipLibCheck": true,
+    "module": "nodenext",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["vite.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}
+```
+
+### Prometheus
+
+#### `observability/prometheus/Dockerfile`
+
+```dockerfile
+FROM prom/prometheus:v3.5.0
+
+COPY prometheus.yml /etc/prometheus/prometheus.yml
+```
+
 ## Preparar el entorno en una computadora
 
 1. Obtén el repositorio y abre su carpeta en VS Code.
@@ -124,18 +439,26 @@ No es necesario instalar Node.js, pnpm ni dependencias JavaScript en Windows par
    ```
 
 3. Edita `.env`, `backend/.env` y `frontend/.env` con los valores adecuados para esa computadora. Usa secretos distintos y seguros; no reutilices literalmente los marcadores de ejemplo.
-   - En el `.env` raíz, `DB_USER`, `DB_PASSWORD` y `DB_NAME` configuran la base creada por PostgreSQL. Los mismos usuario, contraseña y base deben corresponder a la `DATABASE_URL` local de `backend/.env`.
-   - `JWT_SECRET` debe coincidir entre la configuración usada por Compose y la que necesita el backend. `HASH_SALT` se configura en `backend/.env`.
-   - `VITE_API_URL` debe apuntar a la URL que el navegador usa para acceder al backend, normalmente `http://localhost:3000/api`.
+   - El `.env` raíz lo lee Docker Compose para interpolar las variables de PostgreSQL, MinIO, Grafana y puertos. Ahí se configuran `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `GRAFANA_ADMIN_PASSWORD` y los puertos publicados.
+   - `backend/.env` se carga al servicio backend mediante `env_file`; contiene ajustes propios del backend, como `HASH_SALT`. Compose define `DATABASE_URL` para Docker con host `postgres:5432` y pasa `JWT_SECRET` desde el `.env` raíz. La URL local que se mantenga en `backend/.env` sirve cuando el backend se ejecuta fuera de Docker.
+   - `frontend/.env` se carga al servicio frontend mediante `env_file` y configura `VITE_API_URL`, normalmente `http://localhost:3000/api` para las peticiones del navegador.
    - Si un puerto ya está ocupado, cambia el valor correspondiente en el `.env` raíz.
 4. Verifica los archivos privados: `.env` y sus variantes están ignorados por Git. Comparte únicamente las plantillas `.env.example`, nunca los secretos reales.
-5. Asegúrate de que Docker Desktop esté iniciado y ejecuta **Dev Containers: Reopen in Container** desde la paleta de comandos de VS Code (`Ctrl+Shift+P`).
+5. Asegúrate de que Docker Desktop esté iniciado y, desde PowerShell en la raíz del proyecto, levanta todos los servicios:
 
-Dev Containers construye las imágenes de desarrollo y arranca los servicios de Compose. La primera preparación puede tardar porque Docker descarga imágenes e instala las dependencias dentro de los contenedores. El workspace se abre en `/workspace`; el backend trabaja en `/app` y el frontend en `/app` dentro de sus respectivos servicios.
+   ```powershell
+   docker compose up --build -d
+   docker compose ps -a
+   ```
+
+   `--build` construye las imágenes de backend, frontend y Prometheus cuando sea necesario; dentro de las imágenes de desarrollo `RUN pnpm install` instala las dependencias, sin instalar Node/pnpm ni crear `node_modules` en Windows. `-d` deja los servicios en segundo plano y devuelve el control de PowerShell. Sin `-d`, Compose permanece conectado a los logs; `Ctrl+C` detiene los servicios adjuntos.
+6. La configuración de Dev Containers está disponible para abrir el workspace con **Dev Containers: Reopen in Container** (`Ctrl+Shift+P`). En esta PC, el montaje del proyecto desde `E:` puede aparecer vacío dentro del contenedor; para editar con el código sincronizado, usa una copia alojada en el sistema de archivos Linux de WSL2 como se explica abajo.
+
+Dev Containers construye las imágenes de desarrollo y arranca los servicios de Compose. La primera preparación puede tardar porque Docker descarga imágenes e instala las dependencias dentro de los contenedores. El backend y el frontend trabajan en `/app` dentro de sus respectivos servicios.
 
 ### Nota para Docker Desktop en Windows
 
-Los bind mounts deben mostrar los archivos de `backend/` y `frontend/` dentro de `/app`. Si los contenedores informan que no encuentran `package.json` aunque sí exista en Windows, verifica que Docker Desktop tenga acceso a la unidad del proyecto. Si persiste, usa el repositorio dentro del sistema de archivos Linux de WSL2 y abre esa copia desde VS Code conectado a WSL; no borres los volúmenes ni cambies los Dockerfiles para ocultar el problema.
+En esta computadora Docker Desktop creó los bind mounts desde `E:` sin exponer los archivos que contienen `package.json`; montarlos sobre `/app` ocultaba el código que sí estaba en las imágenes y provocaba `ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND`. Por eso Compose conserva el código del build dentro de `/app` y no monta `backend/` ni `frontend/` desde Windows. Los servicios pueden iniciar, pero cambios hechos en el host necesitan un nuevo `docker compose up --build -d`. Para editar con hot reload desde el host, clona el repo en el sistema de archivos Linux de WSL2 y abre esa copia en VS Code conectado a WSL antes de habilitar los bind mounts de fuentes.
 
 El servicio Prometheus incluye su configuración en la imagen mediante `observability/prometheus/Dockerfile`, en vez de montarla como archivo desde Windows. Esto evita que el origen del bind mount de `prometheus.yml` se interprete como directorio.
 
@@ -145,11 +468,12 @@ Los puertos publicados se definen en el `.env` raíz. Estado comprobado en Docke
 
 | Servicio | Dirección/puertos | Estado observado |
 |---|---|---|
-| Frontend | `http://localhost:5173` | Detenido; pnpm no encuentra `package.json` en `/app`. |
-| Backend | `http://localhost:3000` | No inicia; pnpm no encuentra `package.json` en `/app`. `backend/src/index.ts` también requiere implementar el servidor Express antes de que exista una API funcional. |
+| Frontend | `http://localhost:5173` | Contenedor en ejecución; Vite responde HTTP 200. Usa el código de la imagen, porque el bind mount de `E:` se observó vacío. |
+| Backend | `http://localhost:3000` | Contenedor y watcher en ejecución. La API aún no está disponible hasta implementar el servidor Express en `backend/src/index.ts`. |
 | PostgreSQL | `localhost:5433` desde Windows; `postgres:5432` dentro de Compose | En ejecución y saludable; la base `auctionhub` aparece en pgAdmin. |
-| MinIO API | `http://localhost:9000` | Pendiente; en este equipo las descargas de Quay devolvieron `401 UNAUTHORIZED`. |
-| MinIO Console | `http://localhost:9001` | Pendiente mientras MinIO no inicie. |
+| MinIO API | `http://localhost:9000` | En ejecución; `/minio/health/live` respondió HTTP 200. |
+| MinIO Console | `http://localhost:9001` | Publicada por el contenedor MinIO. |
+| Inicializador MinIO | Servicio `minio-init` | Termina con código 0 tras comprobar MinIO y crear el bucket si no existía; es un servicio de una sola ejecución. |
 | cAdvisor | `http://localhost:8081` | En ejecución y saludable. |
 | Prometheus | `http://localhost:9090` | En ejecución; su configuración se copia en la imagen propia para evitar el bind mount de Windows. |
 | Grafana | `http://localhost:3001` | En ejecución. El usuario configurado inicialmente es `admin`. |
@@ -187,7 +511,7 @@ El puerto publicado predeterminado es `5433` porque PostgreSQL instalado directa
 
 ## MinIO y acceso al registro
 
-Compose usa `quay.io/minio/minio:latest` y `quay.io/minio/mc:latest`, adaptado del Compose de otro proyecto del usuario. En este equipo, las descargas devolvieron `401 UNAUTHORIZED`; por ello MinIO y `minio-init` no iniciaron, y el backend también depende de la finalización exitosa de `minio-init`. Que PostgreSQL se vea en pgAdmin no depende de Express ni de MinIO.
+Compose usa `quay.io/minio/minio:latest` para el servidor. Como Quay devolvía `401 UNAUTHORIZED` para `quay.io/minio/mc:latest`, `minio-init` ahora usa la imagen pública `amazon/aws-cli:2.27.49` y se conecta a MinIO por el endpoint S3 `http://minio:9000`. Comprueba que MinIO responda, crea el bucket configurado si aún no existe y termina con código 0; el backend espera que termine ese inicializador. Es un contenedor de tarea única, no un servicio persistente: después de crear/verificar el bucket, `Exited (0)` y el icono de detenido en Docker Desktop son el estado correcto. Los servicios backend y frontend dependen de su finalización exitosa.
 
 ## Base de datos y Prisma
 
@@ -203,17 +527,16 @@ Para ver PostgreSQL en pgAdmin no es necesario ejecutar Prisma Studio; pgAdmin s
 
 ## Desarrollo y recarga de cambios
 
-Compose pretende montar el código local dentro de los contenedores y mantiene las dependencias en volúmenes Docker separados. **En el estado observado, backend y frontend no arrancan:** Docker Desktop ve los directorios del disco `F:` pero no sus archivos dentro de `/app`. Los logs muestran `ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND` (`No package.json ... found in "/app"`). El montaje sobre `/app` oculta los archivos de la imagen, así que pnpm no puede leer los manifiestos.
+Las imágenes de desarrollo instalan las dependencias con `RUN pnpm install` durante el build y copian el código con `COPY . .`. Compose mantiene dependencias en volúmenes nombrados, pero no monta los directorios del host sobre `/app`, porque las pruebas en esta computadora mostraron que Docker Desktop exponía esas rutas vacías y ocultaba `package.json`.
 
-No es un error causado por la ausencia de Express escuchando en el puerto. El orden es: primero Docker debe exponer `package.json` en `/app`, luego pnpm ejecuta scripts; después el backend necesitará que `src/index.ts` configure Express y escuche el puerto. Frontend y backend no deben considerarse accesibles en `5173` y `3000` hasta confirmar que los contenedores están `Up`.
+Por este motivo, los cambios locales a los archivos fuente no llegan al contenedor automáticamente en esta ubicación de Windows; después de editar se debe reconstruir el servicio (`docker compose up --build -d`). Para habilitar sincronización/hot reload desde el host, clona o mueve el proyecto al sistema de archivos Linux de WSL2 y abre esa carpeta desde VS Code conectado a WSL; luego se puede reactivar el montaje de fuentes.
 
-La corrección recomendada para el problema de montaje es ubicar una copia de trabajo del repositorio dentro del sistema de archivos Linux de WSL2 y abrirla en VS Code conectado a WSL. Alternativamente, comprobar que Docker Desktop permite compartir la unidad `F:`. No borres volúmenes para resolverlo.
-
-Cuando los montajes funcionen, los watchers previstos son:
+Los Dockerfiles distinguen desarrollo y producción:
 
 - **Backend:** `pnpm dev` ejecuta `tsx watch src/index.ts`; al guardar cambios TypeScript, el proceso del backend reinicia automáticamente. El polling ayuda a detectar cambios del sistema de archivos en Docker.
 - **Frontend:** Vite escucha en `0.0.0.0:5173`; `DOCKER_DEV=true` activa polling y Vite aplica HMR al guardar componentes, estilos y otros módulos compatibles.
-- Guardar código **no reconstruye ni reinicia todo el contenedor**: los watchers actualizan la aplicación. Cambios en Dockerfiles, `docker-compose.yml` o dependencias sí pueden requerir reconstruir/recrear servicios.
+- En las rutas de desarrollo, las dependencias se instalan durante el build (`RUN pnpm install`) y el `CMD` ejecuta `pnpm dev`. En el Dockerfile de producción del frontend, pnpm se usa en la etapa de build y el `CMD` del runtime ejecuta Nginx para servir el resultado estático.
+- En la configuración actual basada en imágenes, reconstruye el servicio después de cambiar código del host. Cambios en Dockerfiles, `docker-compose.yml` o dependencias también requieren reconstruir/recrear servicios.
 - Cambios en `schema.prisma` requieren generar el cliente y, cuando se cambia el modelo de datos, crear y aplicar una migración.
 
 Comandos útiles desde la raíz del proyecto:
