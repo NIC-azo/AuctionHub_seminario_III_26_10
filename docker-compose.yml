@@ -14,7 +14,7 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the root .env}
       POSTGRES_DB: ${DB_NAME:-auctionhub}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -27,7 +27,7 @@ services:
       tier: data
 
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:latest
     command: server /data --console-address ":9001"
     restart: unless-stopped
     environment:
@@ -43,7 +43,7 @@ services:
       tier: data
 
   minio-init:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:latest
     depends_on:
       - minio
     entrypoint: ["/bin/sh", "-c"]
@@ -117,7 +117,7 @@ services:
     restart: unless-stopped
     privileged: true
     ports:
-      - "${CADVISOR_PORT:-8080}:8080"
+      - "${CADVISOR_PORT:-8081}:8080"
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
@@ -129,7 +129,10 @@ services:
       tier: observability
 
   prometheus:
-    image: prom/prometheus:v3.5.0
+    image: auctionhub-prometheus:local
+    build:
+      context: ./observability/prometheus
+      dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
       - cadvisor
@@ -139,7 +142,6 @@ services:
     ports:
       - "${PROMETHEUS_PORT:-9090}:9090"
     volumes:
-      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     labels:
       <<: *common-labels

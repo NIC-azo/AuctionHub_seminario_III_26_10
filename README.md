@@ -2,7 +2,7 @@
 
 AuctionHub es un proyecto de subastas con frontend React + TypeScript, backend Node.js + Express + Prisma y PostgreSQL. El entorno de desarrollo se orquesta con Docker Compose y puede abrirse desde VS Code mediante Dev Containers.
 
-> **Estado del proyecto:** esta configuración prepara los entornos y servicios. La aplicación todavía está en desarrollo; por ejemplo, `backend/src/index.ts` y `frontend/src/App.tsx` son puntos de entrada que deben completarse con la lógica de la aplicación.
+> **Estado del proyecto:** PostgreSQL está accesible desde pgAdmin y los servicios de observabilidad están levantados en el entorno local comprobado. Backend y frontend todavía no inician correctamente porque Docker Desktop no expone los archivos del workspace montados desde `F:` dentro de sus contenedores. El error reportado es que no se encuentra `package.json` en `/app`; no lo causa que falte un servidor Express en `index.ts`.
 
 ## Requisitos
 
@@ -46,7 +46,9 @@ No es necesario instalar Node.js, pnpm ni dependencias JavaScript en Windows par
 │   └── vite.config.ts
 ├── observability/
 │   ├── grafana/dashboards/auctionhub-dashboard.json
-│   └── prometheus/prometheus.yml
+│   └── prometheus/
+│       ├── Dockerfile
+│       └── prometheus.yml
 ├── scripts/
 │   ├── backup.ps1
 │   └── minio-init.ps1
@@ -60,8 +62,8 @@ No es necesario instalar Node.js, pnpm ni dependencias JavaScript en Windows par
 
 | Archivo | Responsabilidad |
 |---|---|
-| `docker-compose.yml` | Define PostgreSQL, MinIO, inicialización del bucket, backend, frontend, cAdvisor, Prometheus y Grafana. Declara puertos, dependencias, health check de PostgreSQL, volúmenes y etiquetas comunes. |
-| `.env.example` | Plantilla versionable para variables que consume Compose: usuario/contraseña de PostgreSQL, secretos de ejemplo, MinIO, Grafana y puertos. Los valores son marcadores locales; deben personalizarse. |
+| `docker-compose.yml` | Define PostgreSQL, MinIO, inicialización del bucket, backend, frontend, cAdvisor, Prometheus y Grafana. Declara puertos, dependencias, health check de PostgreSQL, volúmenes y etiquetas comunes. MinIO y su cliente `mc` usan imágenes de `quay.io/minio`. |
+| `.env.example` | Plantilla versionable para variables que consume Compose: usuario/contraseña representativos de PostgreSQL, secretos de ejemplo, MinIO, Grafana y puertos. No contiene las credenciales reales de una computadora. |
 | `.env` | Archivo local ignorado por Git para los valores reales de Compose. No debe compartirse ni subirse al repositorio. |
 | `.gitignore` | Excluye dependencias, resultados de build, archivos locales y archivos `.env`. |
 | `.devcontainer/devcontainer.json` | Indica a VS Code que use `docker-compose.yml`, abra el servicio `backend`, monte el proyecto como `/workspace`, reenvíe puertos y recomiende extensiones. |
@@ -71,14 +73,14 @@ No es necesario instalar Node.js, pnpm ni dependencias JavaScript en Windows par
 | Archivo | Responsabilidad |
 |---|---|
 | `backend/package.json` | Dependencias y scripts pnpm: `dev` usa `tsx watch`, `build` compila TypeScript, `start:prod` ejecuta `dist/index.js`, y hay scripts para generar Prisma, migrar y abrir Prisma Studio. Prisma y `@prisma/client` están fijados en `6.19.3`. |
-| `backend/.env.example` | Plantilla de configuración para ejecución local del backend. La URL local usa el host `localhost`; Compose la reemplaza por la dirección interna `postgres` al ejecutar el backend en Docker. |
+| `backend/.env.example` | Plantilla de configuración para ejecución local del backend. Su URL de ejemplo usa `localhost:5433`; Compose la reemplaza por la dirección interna `postgres:5432` al ejecutar el backend en Docker. |
 | `backend/.env` | Variables privadas locales del backend. No subir a Git. |
 | `backend/Dockerfile.dev` | Imagen de desarrollo Node/pnpm; habilita polling y ejecuta el modo `tsx watch` al iniciarse mediante Compose. |
 | `backend/Dockerfile` | Imagen multietapa de producción: instala dependencias, genera el cliente Prisma, compila TypeScript y ejecuta el resultado compilado. |
 | `backend/.dockerignore` | Evita incluir archivos locales, dependencias y artefactos en el contexto de build. |
 | `backend/tsconfig.json` | Configura TypeScript para Node.js, modo estricto, salida `dist` y alias `@/*`. |
 | `backend/prisma/schema.prisma` | Define el datasource PostgreSQL, el generador del cliente Prisma y los modelos `User`, `Product` y `Purchase`. |
-| `backend/src/` | Código de la API. `index.ts` es el punto de entrada actual; aquí se implementan servidor, rutas, controladores, servicios y configuración. |
+| `backend/src/` | Código de la API. `index.ts` es el punto de entrada actual, pero todavía debe implementar el servidor Express. La ausencia de esa implementación no produce el error de pnpm que indica que falta `package.json` en `/app`. |
 
 ### Frontend
 
@@ -104,6 +106,7 @@ No es necesario instalar Node.js, pnpm ni dependencias JavaScript en Windows par
 
 | Archivo | Responsabilidad |
 |---|---|
+| `observability/prometheus/Dockerfile` | Crea una imagen de Prometheus que copia `prometheus.yml` dentro de la imagen, evitando el montaje del archivo de configuración desde Windows. |
 | `observability/prometheus/prometheus.yml` | Configura el scraping de Prometheus y cAdvisor. |
 | `observability/grafana/dashboards/auctionhub-dashboard.json` | Dashboard de Grafana del proyecto. |
 | `scripts/minio-init.ps1` | Script auxiliar de PowerShell para inicializar MinIO. |
@@ -130,34 +133,65 @@ No es necesario instalar Node.js, pnpm ni dependencias JavaScript en Windows par
 
 Dev Containers construye las imágenes de desarrollo y arranca los servicios de Compose. La primera preparación puede tardar porque Docker descarga imágenes e instala las dependencias dentro de los contenedores. El workspace se abre en `/workspace`; el backend trabaja en `/app` y el frontend en `/app` dentro de sus respectivos servicios.
 
-## Servicios y direcciones locales
+### Nota para Docker Desktop en Windows
 
-Los puertos predeterminados están definidos en el `.env` raíz:
+Los bind mounts deben mostrar los archivos de `backend/` y `frontend/` dentro de `/app`. Si los contenedores informan que no encuentran `package.json` aunque sí exista en Windows, verifica que Docker Desktop tenga acceso a la unidad del proyecto. Si persiste, usa el repositorio dentro del sistema de archivos Linux de WSL2 y abre esa copia desde VS Code conectado a WSL; no borres los volúmenes ni cambies los Dockerfiles para ocultar el problema.
 
-| Servicio | Dirección desde Windows | Uso |
+El servicio Prometheus incluye su configuración en la imagen mediante `observability/prometheus/Dockerfile`, en vez de montarla como archivo desde Windows. Esto evita que el origen del bind mount de `prometheus.yml` se interprete como directorio.
+
+## Estado actual de servicios y direcciones locales
+
+Los puertos publicados se definen en el `.env` raíz. Estado comprobado en Docker Desktop:
+
+| Servicio | Dirección/puertos | Estado observado |
 |---|---|---|
-| Frontend | `http://localhost:5173` | Aplicación Vite en desarrollo. |
-| Backend | `http://localhost:3000` | API; las rutas concretas dependen de la implementación del backend. |
-| PostgreSQL | `localhost:5432` | Conexión desde pgAdmin 4 u otra herramienta local. |
-| MinIO API | `http://localhost:9000` | API compatible con S3. |
-| MinIO Console | `http://localhost:9001` | Interfaz web de MinIO. |
-| cAdvisor | `http://localhost:8080` | Métricas de contenedores. |
-| Prometheus | `http://localhost:9090` | Consultas y estado de métricas. |
-| Grafana | `http://localhost:3001` | Dashboards; usuario inicial configurado como `admin`. |
+| Frontend | `http://localhost:5173` | Detenido; pnpm no encuentra `package.json` en `/app`. |
+| Backend | `http://localhost:3000` | No inicia; pnpm no encuentra `package.json` en `/app`. `backend/src/index.ts` también requiere implementar el servidor Express antes de que exista una API funcional. |
+| PostgreSQL | `localhost:5433` desde Windows; `postgres:5432` dentro de Compose | En ejecución y saludable; la base `auctionhub` aparece en pgAdmin. |
+| MinIO API | `http://localhost:9000` | Pendiente; en este equipo las descargas de Quay devolvieron `401 UNAUTHORIZED`. |
+| MinIO Console | `http://localhost:9001` | Pendiente mientras MinIO no inicie. |
+| cAdvisor | `http://localhost:8081` | En ejecución y saludable. |
+| Prometheus | `http://localhost:9090` | En ejecución; su configuración se copia en la imagen propia para evitar el bind mount de Windows. |
+| Grafana | `http://localhost:3001` | En ejecución. El usuario configurado inicialmente es `admin`. |
+
+El estado puede variar según la última operación de Docker. Compruébalo con `docker compose ps --all`.
+
+### Puertos PostgreSQL: host y contenedor
+
+Compose publica PostgreSQL con:
+
+```yaml
+ports:
+  - "${POSTGRES_PORT:-5433}:5432"
+```
+
+El primer puerto (`POSTGRES_PORT`, configurado como `5433` en el `.env` local) pertenece a Windows; el segundo es el puerto interno de PostgreSQL en el contenedor y permanece en `5432`. Por eso:
+
+- pgAdmin instalado en Windows usa `localhost:5433`.
+- Backend ejecutado en Windows usa `localhost:5433` en su `DATABASE_URL`.
+- Backend dentro de Compose usa `postgres:5432`, nombre y puerto internos de la red Docker.
+
+El cambio a `5433` evita el PostgreSQL 18 instalado localmente, que ya ocupa `localhost:5432`. Se comprobó que la contraseña local permite conectar a la base `auctionhub` por `localhost:5433`.
 
 ### Conectar pgAdmin 4
 
 Compose no incluye un contenedor de pgAdmin; se puede usar pgAdmin instalado en Windows para conectarse al PostgreSQL del contenedor:
 
 1. Registra un servidor en pgAdmin.
-2. En **Connection**, configura host `localhost`, puerto `5432`, base de mantenimiento según `DB_NAME`, usuario `DB_USER` y contraseña `DB_PASSWORD` del `.env` raíz.
-3. Si cambiaste `POSTGRES_PORT`, usa ese puerto publicado en lugar de `5432`.
+2. En **Connection**, configura host `localhost`, puerto `5433`, base de mantenimiento `postgres` o `auctionhub`, usuario `DB_USER` y contraseña `DB_PASSWORD` del `.env` raíz.
+3. Si cambiaste `POSTGRES_PORT`, usa ese puerto publicado en lugar de `5433`. El puerto interno del contenedor siempre es `5432`.
 
-PostgreSQL crea la **base de datos** al inicializar por primera vez su volumen. Para crear las tablas de la aplicación también se debe aplicar la migración Prisma.
+La base `auctionhub` fue verificada en pgAdmin. PostgreSQL crea la **base de datos** al inicializar por primera vez su volumen. Para crear las tablas de la aplicación también se debe aplicar la migración Prisma, después de que backend y MinIO puedan iniciar.
+
+El puerto publicado predeterminado es `5433` porque PostgreSQL instalado directamente en Windows ocupa `5432`. Usa `localhost:5433` en pgAdmin para conectarte al contenedor; `localhost:5432` dirige al servidor local de Windows, que tiene credenciales y bases independientes. La contraseña del rol PostgreSQL se establece al inicializar el volumen por primera vez; editar `DB_PASSWORD` después no cambia automáticamente la contraseña almacenada en el volumen.
+
+## MinIO y acceso al registro
+
+Compose usa `quay.io/minio/minio:latest` y `quay.io/minio/mc:latest`, adaptado del Compose de otro proyecto del usuario. En este equipo, las descargas devolvieron `401 UNAUTHORIZED`; por ello MinIO y `minio-init` no iniciaron, y el backend también depende de la finalización exitosa de `minio-init`. Que PostgreSQL se vea en pgAdmin no depende de Express ni de MinIO.
 
 ## Base de datos y Prisma
 
-El esquema está en `backend/prisma/schema.prisma`. Al iniciar por primera vez, con los servicios en ejecución, crea una migración inicial desde PowerShell:
+El esquema está en `backend/prisma/schema.prisma`. Cuando el backend esté disponible, crea una migración inicial desde PowerShell:
 
 ```powershell
 docker compose exec backend pnpm run prisma:migrate -- --name init
@@ -169,7 +203,13 @@ Para ver PostgreSQL en pgAdmin no es necesario ejecutar Prisma Studio; pgAdmin s
 
 ## Desarrollo y recarga de cambios
 
-Compose monta el código local dentro de los contenedores y mantiene las dependencias en volúmenes Docker separados:
+Compose pretende montar el código local dentro de los contenedores y mantiene las dependencias en volúmenes Docker separados. **En el estado observado, backend y frontend no arrancan:** Docker Desktop ve los directorios del disco `F:` pero no sus archivos dentro de `/app`. Los logs muestran `ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND` (`No package.json ... found in "/app"`). El montaje sobre `/app` oculta los archivos de la imagen, así que pnpm no puede leer los manifiestos.
+
+No es un error causado por la ausencia de Express escuchando en el puerto. El orden es: primero Docker debe exponer `package.json` en `/app`, luego pnpm ejecuta scripts; después el backend necesitará que `src/index.ts` configure Express y escuche el puerto. Frontend y backend no deben considerarse accesibles en `5173` y `3000` hasta confirmar que los contenedores están `Up`.
+
+La corrección recomendada para el problema de montaje es ubicar una copia de trabajo del repositorio dentro del sistema de archivos Linux de WSL2 y abrirla en VS Code conectado a WSL. Alternativamente, comprobar que Docker Desktop permite compartir la unidad `F:`. No borres volúmenes para resolverlo.
+
+Cuando los montajes funcionen, los watchers previstos son:
 
 - **Backend:** `pnpm dev` ejecuta `tsx watch src/index.ts`; al guardar cambios TypeScript, el proceso del backend reinicia automáticamente. El polling ayuda a detectar cambios del sistema de archivos en Docker.
 - **Frontend:** Vite escucha en `0.0.0.0:5173`; `DOCKER_DEV=true` activa polling y Vite aplica HMR al guardar componentes, estilos y otros módulos compatibles.
